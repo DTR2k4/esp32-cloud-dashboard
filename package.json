@@ -1,0 +1,20 @@
+{
+  "name": "marketscope",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Dashboard theo dõi thị trường chứng khoán Quốc tế & Việt Nam theo thời gian thực, với backend proxy nhỏ để né CORS và giấu API key.",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "dev:mock": "MOCK_UPSTREAM=1 node --watch server/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}

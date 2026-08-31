@@ -1,43 +1,89 @@
-# Marketscope — GUI demo
+# Marketscope — dashboard thị trường chứng khoán theo thời gian thực
 
-Một trang dashboard thị trường chứng khoán để luyện tập dựng GUI. Toàn bộ mã cổ
-phiếu, tên công ty và dữ liệu giá đều là **hư cấu**, được mô phỏng ngay trong
-trình duyệt bằng JavaScript (random walk) — không gọi tới bất kỳ API bên ngoài
-nào.
+Dashboard theo dõi **thị trường Quốc tế** (qua Finnhub) và **thị trường Việt
+Nam** (qua API công khai không chính thức của VNDirect), tách thành 2 khu vực
+riêng trên cùng một trang. Có backend proxy nhỏ (Node/Express) để giấu API
+key và né lỗi CORS khi gọi API thật từ trình duyệt.
+
+Khi API thật không khả dụng (chưa có key, hết quyền, sập, hoặc bị mạng chặn),
+server tự động rơi về **dữ liệu mô phỏng** và gắn nhãn rõ ràng trên UI (chấm
+tròn + nhãn cạnh tên mỗi khu vực) — dashboard không bao giờ hiển thị màn hình
+trắng hay lỗi vỡ giao diện.
 
 ## Chạy thử
 
-Không cần cài đặt gì cả — chỉ cần mở trực tiếp file `index.html` bằng trình
-duyệt, hoặc phục vụ tĩnh bằng bất kỳ web server nào, ví dụ:
-
 ```bash
-python3 -m http.server 8000
-# rồi mở http://localhost:8000
+npm install
+cp .env.example .env
+# Mở .env, dán API key Finnhub miễn phí vào FINNHUB_API_KEY
+# (đăng ký free tại https://finnhub.io/register, mất khoảng 1 phút)
+npm start
+# Mở http://localhost:3000
 ```
 
-Cũng có thể deploy thẳng lên GitHub Pages / Netlify / Vercel vì đây chỉ là
-một file HTML tĩnh (HTML + CSS + JS thuần, không cần build).
+Không có key cũng chạy được — phần Quốc tế sẽ chỉ hiển thị ở chế độ mô phỏng
+cho tới khi bạn thêm key vào `.env` và khởi động lại server.
 
-## Tính năng
+Muốn phát triển mà không tốn quota API thật / không cần mạng: chạy chế độ
+mock (luôn trả dữ liệu giả cho cả 2 khu vực, không gọi API ngoài nào):
 
-- Danh sách theo dõi (watchlist) 10 mã cổ phiếu mô phỏng, có tìm kiếm, mini
-  biểu đồ sparkline và giá cập nhật theo thời gian thực (mỗi 1.5s).
-- 3 thẻ chỉ số thị trường tổng hợp (toàn thị trường / công nghệ / năng lượng
-  & vật liệu).
-- Biểu đồ giá chi tiết cho mã đang chọn, đổi khung thời gian 1D/1T/1TH/3TH/1N,
-  có crosshair + tooltip khi rê chuột, và bảng dữ liệu dạng text đi kèm.
-- Bảng "Tăng mạnh nhất" / "Giảm mạnh nhất" trong ngày.
-- Chuyển đổi giao diện sáng / tối (ghi nhớ lựa chọn qua `localStorage`).
-- Responsive: sidebar chuyển xuống dưới trên màn hình hẹp.
+```bash
+npm run dev:mock
+```
 
-## Cấu trúc
+## Vì sao cần backend?
 
-Toàn bộ giao diện nằm gọn trong `index.html` (không phụ thuộc framework hay
-build tool), chỉ tải font từ Google Fonts (IBM Plex Sans / IBM Plex Mono).
+Gọi thẳng API thị trường từ JavaScript chạy trong trình duyệt gặp 2 vấn đề:
+lộ API key công khai trong mã nguồn, và nhiều API chặn CORS nên trình duyệt
+không gọi trực tiếp được. Server nhỏ trong `server/` đứng giữa để giữ key ở
+phía server và trả dữ liệu JSON cùng-origin cho frontend.
 
-## Bước tiếp theo (nếu muốn nối vào dữ liệu ESP32 thật)
+## Nguồn dữ liệu
 
-File này hiện tự sinh dữ liệu giả trong hàm `genWalk()` / `tick()` ở cuối
-`index.html`. Để thay bằng dữ liệu thật từ ESP32 qua cloud (MQTT/HTTP/
-Firebase...), chỉ cần thay các hàm đó bằng lời gọi tới backend/broker tương
-ứng và giữ nguyên phần render UI.
+| Khu vực | Nguồn | Ghi chú |
+|---|---|---|
+| Quốc tế | [Finnhub](https://finnhub.io) `/quote` | API chính thức, cần API key miễn phí. Free tier không có nến lịch sử intraday, nên biểu đồ quốc tế là **"phiên trực tiếp"** — tự vẽ dần từ các lần poll thật kể từ khi mở trang, không có khung 1 tuần/1 tháng. |
+| Việt Nam | VNDirect `finfo-api` (`/v4/stock_prices`) | **API công khai không chính thức** — không cần key, nhưng không có tài liệu/SLA chính thức, có thể đổi schema hoặc ngừng hoạt động bất kỳ lúc nào. Có dữ liệu lịch sử theo ngày nên biểu đồ VN hỗ trợ chọn khung 1/3/6 tháng. |
+
+Nếu nguồn VNDirect ngừng hoạt động, thay hàm trong
+`server/providers/vndirect.js` bằng một nguồn khác (SSI iBoard, DNSE, hoặc
+một API trả phí có SLA rõ ràng) — phần còn lại của server/frontend không cần
+đổi vì đã tách lớp qua `providers/`.
+
+## Cấu trúc dự án
+
+```
+server/
+  index.js              # Express app: định nghĩa route /api/..., cache, fallback
+  providers/
+    finnhub.js           # Gọi Finnhub thật
+    vndirect.js           # Gọi VNDirect thật
+    simulate.js           # Sinh dữ liệu mô phỏng dự phòng (seed theo mã + thời gian)
+public/
+  index.html             # Khung trang + <template> cho một khu vực thị trường
+  styles.css             # Toàn bộ giao diện, hỗ trợ sáng/tối
+  app.js                 # MarketPanel: watchlist, biểu đồ, bảng tăng/giảm, polling
+```
+
+Mỗi khu vực thị trường (Quốc tế / Việt Nam) là một instance của cùng class
+`MarketPanel` trong `app.js`, chỉ khác nguồn dữ liệu và định dạng giá — nên
+muốn thêm một thị trường thứ 3 chỉ cần thêm route backend + một
+`new MarketPanel({...})` mới trên frontend.
+
+## API nội bộ
+
+- `GET /api/international/quotes` — giá 8 mã Mỹ (AAPL, MSFT, GOOGL, AMZN, NVDA, TSLA, META, NFLX).
+- `GET /api/vietnam/quotes` — giá 8 mã VN (VNM, VIC, VHM, HPG, FPT, MWG, VCB, MSN).
+- `GET /api/vietnam/history?symbol=VNM&days=90` — chuỗi giá đóng cửa theo ngày.
+
+Mỗi response luôn có field `source` (`live` | `fallback` | `mock`) và
+`reason` (khi fallback) để frontend hiển thị đúng trạng thái.
+
+## Giới hạn cần biết
+
+- Đây là **demo/dự án luyện tập**, không phải sản phẩm giao dịch thực tế — không phải lời khuyên đầu tư.
+- VNDirect là API không chính thức; môi trường phát triển của bạn có thể chặn
+  domain này (một số mạng công ty/CI chặn theo whitelist) — khi đó server sẽ
+  tự rơi về dữ liệu mô phỏng và log lý do ra console.
+- Finnhub free tier giới hạn ~60 request/phút; server đã cache 12s/lần gọi để
+  nhiều tab/nhiều người xem cùng lúc không vượt hạn mức.
