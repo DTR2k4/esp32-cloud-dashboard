@@ -41,6 +41,10 @@ function simulateQuote(symbol, base) {
     high: price + Math.abs(drift) * 0.6,
     low: price - Math.abs(drift) * 0.6,
     prevClose: prevClose,
+    // Biên độ +/-7% mô phỏng theo quy định trần/sàn của HOSE — chỉ khu vực VN
+    // dùng 2 field này (xem statsFields trong public/app.js).
+    ceiling: prevClose * 1.07,
+    floor: prevClose * 0.93,
     change: change,
     changePercent: changePercent,
     updatedAt: Date.now()

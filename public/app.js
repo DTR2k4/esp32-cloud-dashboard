@@ -51,6 +51,15 @@
     this.historyUrl = opts.historyUrl; // function(symbol, days) -> url
     this.rangeOptions = opts.rangeOptions || null; // [{key,label,days}]
     this.liveLabel = opts.liveLabel;
+    this.wsUrl = opts.wsUrl || null;
+    this.statsFields = opts.statsFields || function (item, priceFmt) {
+      return [
+        ["Mở cửa", priceFmt(item.open)],
+        ["Cao nhất", priceFmt(item.high)],
+        ["Thấp nhất", priceFmt(item.low)],
+        ["Tham chiếu", priceFmt(item.prevClose)]
+      ];
+    };
 
     this.root = document.getElementById(this.rootId);
     this.items = [];
@@ -62,14 +71,20 @@
 
     this._buildSkeleton();
     this._wireStatic();
-    this.refresh();
     var self = this;
-    if (!this.hasHistory) {
-      // Vẽ biểu đồ phiên trực tiếp cần ít nhất 2 điểm — poll thêm một lần
-      // sớm để không bắt người dùng chờ hết cả pollMs mới thấy đường biểu đồ.
-      setTimeout(function () { self.refresh(); }, 3000);
+
+    if (this.wsUrl) {
+      this.refresh(); // sơn dữ liệu ngay trong lúc chờ WebSocket bắt tay
+      this._connectWs();
+    } else {
+      this.refresh();
+      if (!this.hasHistory) {
+        // Vẽ biểu đồ phiên trực tiếp cần ít nhất 2 điểm — poll thêm một lần
+        // sớm để không bắt người dùng chờ hết cả pollMs mới thấy đường biểu đồ.
+        setTimeout(function () { self.refresh(); }, 3000);
+      }
+      setInterval(function () { self.refresh(); }, this.pollMs);
     }
-    setInterval(function () { self.refresh(); }, this.pollMs);
     window.addEventListener("resize", debounce(function () { self._drawChart(); }, 120));
   }
 
@@ -133,41 +148,75 @@
     });
   };
 
-  /* ---------------- data fetch ---------------- */
+  /* ---------------- data fetch (REST) ---------------- */
   MarketPanel.prototype.refresh = function () {
     var self = this;
     fetch(this.quotesUrl).then(function (r) { return r.json(); }).then(function (data) {
       if (data.error) throw new Error(data.error);
-      self.items = data.items || [];
-      self.source = data.source;
-      self.reason = data.reason;
-      self.updatedAt = data.updatedAt;
-
-      if (!self.selected && self.items.length) self.selected = self.items[0].symbol;
-
-      if (!self.hasHistory) {
-        var now = Date.now();
-        self.items.forEach(function (item) {
-          var arr = self.sessionHistory.get(item.symbol) || [];
-          arr.push({ t: now, price: item.price });
-          if (arr.length > 200) arr.shift();
-          self.sessionHistory.set(item.symbol, arr);
-        });
-      }
-
-      self._renderBadge();
-      self._renderWatchlist();
-      self._renderDetailHead();
-      self._renderMovers();
-
-      if (self.hasHistory) {
-        self._loadHistoryAndDraw(false);
-      } else {
-        self._drawChart();
-      }
+      self._applyQuotesData(data);
     }).catch(function (err) {
       self._renderBadge({ source: "error", reason: err.message });
     });
+  };
+
+  /* ---------------- data push (WebSocket) ---------------- */
+  MarketPanel.prototype._connectWs = function () {
+    var self = this;
+    var url = this.wsUrl;
+    var socket;
+    try {
+      socket = new WebSocket(url);
+    } catch (e) {
+      // Trình duyệt/mạng không cho mở WebSocket — không có REST poll dự phòng
+      // cho khu vực này nên chỉ báo lỗi, dữ liệu ban đầu từ refresh() vẫn đứng yên.
+      self._renderBadge({ source: "error", reason: "Không mở được WebSocket: " + e.message });
+      return;
+    }
+    socket.addEventListener("message", function (evt) {
+      var data;
+      try { data = JSON.parse(evt.data); } catch (e) { return; }
+      if (data.error) return;
+      self._applyQuotesData(data);
+    });
+    socket.addEventListener("close", function () {
+      self._renderBadge({ source: "fallback", reason: "Mất kết nối WebSocket, đang thử kết nối lại…" });
+      setTimeout(function () { self._connectWs(); }, 3000);
+    });
+    socket.addEventListener("error", function () {
+      socket.close();
+    });
+  };
+
+  /* ---------------- áp dụng dữ liệu quote mới (dùng chung cho REST & WS) ---------------- */
+  MarketPanel.prototype._applyQuotesData = function (data) {
+    var self = this;
+    self.items = data.items || [];
+    self.source = data.source;
+    self.reason = data.reason;
+    self.updatedAt = data.updatedAt;
+
+    if (!self.selected && self.items.length) self.selected = self.items[0].symbol;
+
+    if (!self.hasHistory) {
+      var now = Date.now();
+      self.items.forEach(function (item) {
+        var arr = self.sessionHistory.get(item.symbol) || [];
+        arr.push({ t: now, price: item.price });
+        if (arr.length > 200) arr.shift();
+        self.sessionHistory.set(item.symbol, arr);
+      });
+    }
+
+    self._renderBadge();
+    self._renderWatchlist();
+    self._renderDetailHead();
+    self._renderMovers();
+
+    if (self.hasHistory) {
+      self._loadHistoryAndDraw(false);
+    } else {
+      self._drawChart();
+    }
   };
 
   MarketPanel.prototype._loadHistoryAndDraw = function (force) {
@@ -260,11 +309,9 @@
     }
     this._lastRenderedPrice = item.price;
 
-    this.els.statsRow.innerHTML =
-      '<span>Mở cửa <b class="num">' + this.priceFmt(item.open) + "</b></span>" +
-      '<span>Cao nhất <b class="num">' + this.priceFmt(item.high) + "</b></span>" +
-      '<span>Thấp nhất <b class="num">' + this.priceFmt(item.low) + "</b></span>" +
-      '<span>Tham chiếu <b class="num">' + this.priceFmt(item.prevClose) + "</b></span>";
+    this.els.statsRow.innerHTML = this.statsFields(item, this.priceFmt).map(function (pair) {
+      return "<span>" + pair[0] + ' <b class="num">' + pair[1] + "</b></span>";
+    }).join("");
   };
 
   /* ---------------- rendering: movers ---------------- */
@@ -449,15 +496,17 @@
   setInterval(tickClock, 1000);
 
   /* ---------------- bootstrap the two market panels ---------------- */
+  var wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+
   new MarketPanel({
     key: "intl",
     rootId: "intl-section",
     title: "Thị trường Quốc tế",
     icon: "🌍",
     quotesUrl: "/api/international/quotes",
-    pollMs: 15000,
+    wsUrl: wsProtocol + "//" + location.host + "/ws/international",
     priceFmt: fmtUSD,
-    liveLabel: "Phiên trực tiếp"
+    liveLabel: "Phiên trực tiếp (WebSocket)"
   });
 
   new MarketPanel({
@@ -473,6 +522,15 @@
       { key: "1M", label: "1TH", days: 30 },
       { key: "3M", label: "3TH", days: 90 },
       { key: "6M", label: "6TH", days: 180 }
-    ]
+    ],
+    statsFields: function (item, priceFmt) {
+      return [
+        ["Trần", priceFmt(item.ceiling)],
+        ["Sàn", priceFmt(item.floor)],
+        ["Cao nhất", priceFmt(item.high)],
+        ["Thấp nhất", priceFmt(item.low)],
+        ["Tham chiếu", priceFmt(item.prevClose)]
+      ];
+    }
   });
 })();
