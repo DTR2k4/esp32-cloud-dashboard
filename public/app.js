@@ -501,8 +501,8 @@
   new MarketPanel({
     key: "intl",
     rootId: "intl-section",
-    title: "Thị trường Quốc tế",
-    icon: "🌍",
+    title: "Thị trường Mỹ",
+    icon: "🇺🇸",
     quotesUrl: "/api/international/quotes",
     wsUrl: wsProtocol + "//" + location.host + "/ws/international",
     priceFmt: fmtUSD,

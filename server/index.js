@@ -7,15 +7,17 @@ const path = require("path");
 const http = require("http");
 const { WebSocketServer } = require("ws");
 
-const finnhub = require("./providers/finnhub");
-const { createFinnhubStream } = require("./providers/finnhub-ws");
+const alpaca = require("./providers/alpaca");
+const { createAlpacaStream } = require("./providers/alpaca-ws");
 const vnstock = require("./providers/vnstock");
 const { simulateQuote, simulateHistory } = require("./providers/simulate");
 
 const app = express();
 app.use(cors());
 
-const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY || "";
+const ALPACA_KEY_ID = process.env.ALPACA_API_KEY_ID || "";
+const ALPACA_SECRET_KEY = process.env.ALPACA_API_SECRET_KEY || "";
+const ALPACA_CONFIGURED = !!(ALPACA_KEY_ID && ALPACA_SECRET_KEY);
 const MOCK_UPSTREAM = process.env.MOCK_UPSTREAM === "1";
 
 const INTL_SYMBOLS = [
@@ -41,19 +43,28 @@ const VN_SYMBOLS = [
 ];
 
 /* =========================================================================
- * QUỐC TẾ — Finnhub WebSocket (real-time) với REST làm nền/dự phòng.
+ * MỸ (nhãn cũ "Quốc tế") — Alpaca Markets WebSocket (real-time, feed IEX)
+ * với REST làm nền/dự phòng.
  *
- * Kiến trúc: server giữ 1 kết nối WS duy nhất tới Finnhub (không phải mỗi
- * client trình duyệt tự mở 1 kết nối riêng — vừa tiết kiệm quota, vừa để
- * server có chỗ chèn logic fallback). Mỗi tick trade cập nhật `intlState`
- * trong bộ nhớ; state này được:
+ * (Trước dùng Finnhub — free tier của Finnhub bị lỗi 403 rất phổ biến và dai
+ * dẳng trên diện rộng, không phải do cấu hình sai riêng của dự án này, nên
+ * đổi sang Alpaca. Xem ghi chú trong README.)
+ *
+ * "Quốc tế" chỉ mang tính lịch sử trong tên biến/route — thực tế API miễn phí
+ * nào cũng chỉ có real-time cho cổ phiếu Mỹ (IEX/NYSE/NASDAQ), không có sàn
+ * nào khác miễn phí thật sự, nên UI hiển thị là "Thị trường Mỹ" cho đúng.
+ *
+ * Kiến trúc: server giữ 1 kết nối WS duy nhất tới Alpaca (không phải mỗi
+ * client trình duyệt tự mở 1 kết nối riêng — vừa tiết kiệm quota (free tier
+ * chỉ cho 1 kết nối đồng thời), vừa để server có chỗ chèn logic fallback).
+ * Mỗi tick trade cập nhật `intlState` trong bộ nhớ; state này được:
  *   - đọc trực tiếp bởi GET /api/international/quotes (không gọi upstream)
  *   - đẩy (broadcast, có throttle) tới mọi client đang mở ws://.../ws/international
  * ========================================================================= */
 
 const intlState = new Map(); // symbol -> { name, price, open, high, low, prevClose, change, changePercent, updatedAt }
-let intlMode = MOCK_UPSTREAM ? "mock" : FINNHUB_API_KEY ? "connecting" : "fallback";
-let intlReason = (!MOCK_UPSTREAM && !FINNHUB_API_KEY) ? "Thiếu FINNHUB_API_KEY trên server — xem file .env.example." : undefined;
+let intlMode = MOCK_UPSTREAM ? "mock" : ALPACA_CONFIGURED ? "connecting" : "fallback";
+let intlReason = (!MOCK_UPSTREAM && !ALPACA_CONFIGURED) ? "Thiếu ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY trên server — xem file .env.example." : undefined;
 
 function seedIntlFallback() {
   INTL_SYMBOLS.forEach(function (t) {
@@ -64,7 +75,7 @@ seedIntlFallback();
 
 async function seedIntlFromRest() {
   try {
-    const quotes = await finnhub.fetchQuotes(INTL_SYMBOLS.map(function (t) { return t.symbol; }), FINNHUB_API_KEY);
+    const quotes = await alpaca.fetchSnapshots(INTL_SYMBOLS.map(function (t) { return t.symbol; }), ALPACA_KEY_ID, ALPACA_SECRET_KEY);
     INTL_SYMBOLS.forEach(function (t, i) {
       intlState.set(t.symbol, Object.assign({ symbol: t.symbol, name: t.name }, quotes[i]));
     });
@@ -101,18 +112,23 @@ function scheduleIntlBroadcast() {
 if (MOCK_UPSTREAM) {
   // Không đụng mạng ngoài — chỉ đổi số mô phỏng định kỳ để "sống động".
   setInterval(function () { seedIntlFallback(); scheduleIntlBroadcast(); }, 5000);
-} else if (FINNHUB_API_KEY) {
+} else if (ALPACA_CONFIGURED) {
   seedIntlFromRest().then(function () {
-    createFinnhubStream({
-      apiKey: FINNHUB_API_KEY,
+    createAlpacaStream({
+      keyId: ALPACA_KEY_ID,
+      secretKey: ALPACA_SECRET_KEY,
       symbols: INTL_SYMBOLS.map(function (t) { return t.symbol; }),
       onStatus: function (status) {
-        if (status === "open") { intlMode = "live"; console.log("✅ Finnhub WebSocket: đã kết nối, nhận trade real-time."); }
-        if (status === "connecting") intlMode = "connecting";
-        if (status === "closed") {
+        if (status === "open") { intlMode = "live"; console.log("✅ Alpaca WebSocket: đã kết nối, nhận trade real-time (feed IEX)."); }
+        else if (status === "connecting") intlMode = "connecting";
+        else if (status === "closed") {
           intlMode = "fallback";
-          intlReason = "Mất kết nối WebSocket tới Finnhub, đang thử kết nối lại…";
-          console.log("⚠️  Finnhub WebSocket đóng — sẽ tự kết nối lại.");
+          intlReason = "Mất kết nối WebSocket tới Alpaca, đang thử kết nối lại…";
+          console.log("⚠️  Alpaca WebSocket đóng — sẽ tự kết nối lại.");
+        } else if (status.indexOf("error:") === 0) {
+          intlMode = "fallback";
+          intlReason = "Alpaca WebSocket lỗi xác thực: " + status.slice(6) + " (kiểm tra lại ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY)";
+          console.log("⚠️  " + intlReason);
         }
       },
       onTrade: function (symbol, price, ts) {
@@ -129,14 +145,14 @@ if (MOCK_UPSTREAM) {
       }
     });
   });
-  // WS đôi khi im lặng ngoài giờ giao dịch Mỹ (không có trade) — REST polling
-  // nhẹ mỗi 60s để prevClose/open không bị "đứng hình" qua nhiều ngày liền
-  // và để badge có gì đó mới ngay cả lúc thị trường đóng cửa.
+  // WS đôi khi im lặng ngoài giờ giao dịch Mỹ (không có trade trên IEX) — REST
+  // polling nhẹ mỗi 60s để prevClose/open không bị "đứng hình" qua nhiều ngày
+  // liền và để badge có gì đó mới ngay cả lúc thị trường đóng cửa.
   setInterval(function () {
     if (intlMode !== "live") seedIntlFromRest().then(scheduleIntlBroadcast);
   }, 60000);
 } else {
-  // Không có key: refresh dữ liệu mô phỏng định kỳ như trên.
+  // Thiếu key: refresh dữ liệu mô phỏng định kỳ như trên.
   setInterval(function () { seedIntlFallback(); scheduleIntlBroadcast(); }, 5000);
 }
 
@@ -216,8 +232,8 @@ app.use(express.static(path.join(__dirname, "..", "public")));
 
 const server = http.createServer(app);
 
-/* WebSocket cho khu vực Quốc tế: mỗi client trình duyệt subscribe ở đây thay
- * vì tự bắn request Finnhub riêng — server đứng giữa giữ 1 kết nối upstream. */
+/* WebSocket cho khu vực Mỹ: mỗi client trình duyệt subscribe ở đây thay vì tự
+ * bắn request Alpaca riêng — server đứng giữa giữ 1 kết nối upstream. */
 const intlWsClients = new Set();
 const wss = new WebSocketServer({ server: server, path: "/ws/international" });
 wss.on("connection", function (ws) {
@@ -229,7 +245,7 @@ wss.on("connection", function (ws) {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log("Marketscope server: http://localhost:" + PORT);
-  if (!FINNHUB_API_KEY && !MOCK_UPSTREAM) {
-    console.log("⚠️  Chưa cấu hình FINNHUB_API_KEY — phần Quốc tế sẽ chạy ở chế độ dữ liệu mô phỏng.");
+  if (!ALPACA_CONFIGURED && !MOCK_UPSTREAM) {
+    console.log("⚠️  Chưa cấu hình ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY — phần thị trường Mỹ sẽ chạy ở chế độ dữ liệu mô phỏng.");
   }
 });
